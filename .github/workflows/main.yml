@@ -25,7 +25,7 @@ env:
 
 jobs:
   build-release:
-    name: Build 4 APKs and Release
+    name: Build Mobile + Leanback and Release
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -42,6 +42,11 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -101,7 +106,6 @@ jobs:
 
           KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
 
-          # 先验证 keystore 和 alias，避免编译 8 分钟后才在 package 阶段失败
           keytool -list \
             -keystore app/signing/release.jks \
             -storepass "$WEBHTV_SIGNING_STORE_PASSWORD" \
@@ -116,21 +120,16 @@ jobs:
 
           echo "Signing keystore and alias verified."
 
-      - name: Show Gradle projects and tasks
-        run: |
-          ./gradlew projects --no-daemon
-          ./gradlew :app:tasks --all --no-daemon | grep -E "assemble(Mobile|Leanback).*(Release)" || true
-
-      - name: Build four release APKs
+      - name: Build FongMi official release tasks
         shell: bash
         run: |
           set -euo pipefail
 
+          rm -rf Release/apk
+
           ./gradlew \
-            :app:assembleMobileArm64_v8aRelease \
-            :app:assembleMobileArmeabi_v7aRelease \
-            :app:assembleLeanbackArm64_v8aRelease \
-            :app:assembleLeanbackArmeabi_v7aRelease \
+            :app:assembleMobileRelease \
+            :app:assembleLeanbackRelease \
             --no-daemon \
             --stacktrace
 
@@ -142,24 +141,23 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
-          mapfile -t APKS < <(find app/build/outputs/apk Release/apk -type f -name "*.apk" 2>/dev/null | sort -u)
+          if [ -d "Release/apk" ]; then
+            find Release/apk -maxdepth 1 -type f -name "*.apk" -print -exec cp {} dist/ \;
+          fi
 
-          if [ "${#APKS[@]}" -eq 0 ]; then
-            echo "::error::No APK files found."
-            find app/build/outputs -maxdepth 6 -type f 2>/dev/null || true
+          if ! compgen -G "dist/*.apk" > /dev/null; then
+            echo "Release/apk did not contain APKs, checking Gradle output directories..."
+            find app/build/outputs/apk -type f -name "*.apk" -print -exec cp {} dist/ \; 2>/dev/null || true
+          fi
+
+          if ! compgen -G "dist/*.apk" > /dev/null; then
+            echo "::error::No APK files found after build."
+            find Release app/build/outputs -maxdepth 6 -type f 2>/dev/null || true
             exit 1
           fi
 
-          echo "Found ${#APKS[@]} APK(s):"
-          printf ' - %s\n' "${APKS[@]}"
-
-          for APK in "${APKS[@]}"; do
-            NAME="$(basename "$APK")"
-            cp "$APK" "dist/$NAME"
-          done
-
-          echo "Release files:"
-          ls -lh dist/
+          echo "Collected APKs:"
+          ls -lh dist/*.apk
 
       - name: Verify APK signatures
         shell: bash
@@ -193,13 +191,11 @@ jobs:
           version_name = os.environ["VERSION_NAME"]
           version_code = int(os.environ.get("VERSION_CODE", "0"))
           short_sha = os.environ["SHORT_SHA"]
-
           base_url = f"https://github.com/{repo}/releases/download/{tag}"
 
           for apk in glob.glob("dist/*.apk"):
               name = os.path.basename(apk)
               stem = os.path.splitext(name)[0]
-
               with open(apk, "rb") as f:
                   content = f.read()
 
@@ -218,8 +214,6 @@ jobs:
                   f.write("\n")
           PY
 
-          ls -lh dist/
-
       - name: Create GitHub Release
         shell: bash
         env:
@@ -237,9 +231,7 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          # 如果 tag 已存在，则更新该 Release 的附件；否则新建 Release
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists, uploading/replacing assets..."
             gh release upload "$TAG" dist/*.apk dist/*.json --clobber
           else
             gh release create "$TAG" \
