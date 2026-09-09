@@ -1,56 +1,261 @@
-name: Publish website to GitHub Pages
+name: FongMi TV Android Release
 
 on:
-  push:
-    branches: [fongmi]
-    paths:
-      - "website/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag，留空则自动生成 v<versionName>-yyyyMMddHHmm"
+        required: false
+        type: string
+      release_notes:
+        description: "Release notes，留空使用默认说明"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
-  contents: read
+  contents: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: false
+env:
+  TZ: Asia/Shanghai
 
 jobs:
-  build:
+  build-release:
+    name: Build 4 APKs and Release
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: website
-    permissions:
-      contents: read
-      pages: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: website/package-lock.json
-      - uses: actions/configure-pages@v5
-        id: pages
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run build
-        env:
-          SITE_URL: ${{ steps.pages.outputs.base_url }}
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: website/out
+    timeout-minutes: 90
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/deploy-pages@v5
-        id: deployment
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant Gradle permission
+        run: chmod +x ./gradlew
+
+      - name: Resolve version and tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*["'\'']\([^"'\'']*\)["'\''].*/\1/p' app/build.gradle | head -1)"
+          VERSION_CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle | head -1)"
+
+          if [ -z "$VERSION_NAME" ]; then
+            echo "::error::Cannot read versionName from app/build.gradle"
+            exit 1
+          fi
+
+          if [ -z "$VERSION_CODE" ]; then
+            VERSION_CODE="0"
+          fi
+
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
+          fi
+
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure release signing
+        shell: bash
+        env:
+          WEBHTV_SIGNING_KEYSTORE_B64: ${{ secrets.WEBHTV_SIGNING_KEYSTORE_B64 }}
+          WEBHTV_SIGNING_STORE_PASSWORD: ${{ secrets.WEBHTV_SIGNING_STORE_PASSWORD }}
+          WEBHTV_SIGNING_KEY_ALIAS: ${{ secrets.WEBHTV_SIGNING_KEY_ALIAS }}
+          WEBHTV_SIGNING_KEY_PASSWORD: ${{ secrets.WEBHTV_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WEBHTV_SIGNING_KEYSTORE_B64:-}" ] || \
+             [ -z "${WEBHTV_SIGNING_STORE_PASSWORD:-}" ] || \
+             [ -z "${WEBHTV_SIGNING_KEY_ALIAS:-}" ]; then
+            echo "::error::Missing signing secrets."
+            echo "::error::Required: WEBHTV_SIGNING_KEYSTORE_B64, WEBHTV_SIGNING_STORE_PASSWORD, WEBHTV_SIGNING_KEY_ALIAS"
+            exit 1
+          fi
+
+          mkdir -p app/signing
+          printf '%s' "$WEBHTV_SIGNING_KEYSTORE_B64" | base64 --decode > app/signing/release.jks
+
+          KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
+
+          # 先验证 keystore 和 alias，避免编译 8 分钟后才在 package 阶段失败
+          keytool -list \
+            -keystore app/signing/release.jks \
+            -storepass "$WEBHTV_SIGNING_STORE_PASSWORD" \
+            -alias "$WEBHTV_SIGNING_KEY_ALIAS" >/dev/null
+
+          cat > local.properties <<EOF
+          storeFile=$GITHUB_WORKSPACE/app/signing/release.jks
+          keyAlias=$WEBHTV_SIGNING_KEY_ALIAS
+          storePassword=$WEBHTV_SIGNING_STORE_PASSWORD
+          keyPassword=$KEY_PASS
+          EOF
+
+          echo "Signing keystore and alias verified."
+
+      - name: Show Gradle projects and tasks
+        run: |
+          ./gradlew projects --no-daemon
+          ./gradlew :app:tasks --all --no-daemon | grep -E "assemble(Mobile|Leanback).*(Release)" || true
+
+      - name: Build four release APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./gradlew \
+            :app:assembleMobileArm64_v8aRelease \
+            :app:assembleMobileArmeabi_v7aRelease \
+            :app:assembleLeanbackArm64_v8aRelease \
+            :app:assembleLeanbackArmeabi_v7aRelease \
+            --no-daemon \
+            --stacktrace
+
+      - name: Collect APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf dist
+          mkdir -p dist
+
+          mapfile -t APKS < <(find app/build/outputs/apk Release/apk -type f -name "*.apk" 2>/dev/null | sort -u)
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::No APK files found."
+            find app/build/outputs -maxdepth 6 -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Found ${#APKS[@]} APK(s):"
+          printf ' - %s\n' "${APKS[@]}"
+
+          for APK in "${APKS[@]}"; do
+            NAME="$(basename "$APK")"
+            cp "$APK" "dist/$NAME"
+          done
+
+          echo "Release files:"
+          ls -lh dist/
+
+      - name: Verify APK signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found"
+            exit 1
+          fi
+
+          for APK in dist/*.apk; do
+            echo "Checking $APK"
+            "$APKSIGNER" verify --verbose "$APK"
+          done
+
+      - name: Generate update manifests
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          VERSION_NAME: ${{ steps.meta.outputs.version_name }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        run: |
+          python3 - <<'PY'
+          import glob, hashlib, json, os
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          version_name = os.environ["VERSION_NAME"]
+          version_code = int(os.environ.get("VERSION_CODE", "0"))
+          short_sha = os.environ["SHORT_SHA"]
+
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
+
+          for apk in glob.glob("dist/*.apk"):
+              name = os.path.basename(apk)
+              stem = os.path.splitext(name)[0]
+
+              with open(apk, "rb") as f:
+                  content = f.read()
+
+              data = {
+                  "name": tag,
+                  "versionName": version_name,
+                  "code": version_code,
+                  "desc": f"{tag} - {short_sha}",
+                  "apk": f"{base_url}/{name}",
+                  "size": len(content),
+                  "sha256": hashlib.sha256(content).hexdigest()
+              }
+
+              with open(f"dist/{stem}.json", "w", encoding="utf-8") as f:
+                  json.dump(data, f, ensure_ascii=False, indent=2)
+                  f.write("\n")
+          PY
+
+          ls -lh dist/
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          TITLE="${{ steps.meta.outputs.title }}"
+          NOTES="${RELEASE_NOTES:-FongMi TV GitHub Actions 自动构建发布。}"
+
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # 如果 tag 已存在，则更新该 Release 的附件；否则新建 Release
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, uploading/replacing assets..."
+            gh release upload "$TAG" dist/*.apk dist/*.json --clobber
+          else
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              $PRERELEASE_FLAG \
+              dist/*.apk dist/*.json
+          fi
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FongMi-TV-${{ steps.meta.outputs.tag }}
+          path: |
+            dist/*.apk
+            dist/*.json
+          if-no-files-found: error
+          retention-days: 30
