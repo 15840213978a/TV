@@ -1,4 +1,4 @@
-name: FongMi TV Android Release
+name: FongMi TV Four-Repo Build
 
 on:
   push:
@@ -44,17 +44,34 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Checkout FongMi media
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/media
+          ref: release
+          path: .deps/media
+          fetch-depth: 1
+
+      - name: Checkout FongMi mpv-android
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/mpv-android
+          path: .deps/mpv-android
+          fetch-depth: 1
+
+      - name: Checkout FongMi mpv
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/mpv
+          path: .deps/mpv
+          fetch-depth: 1
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
           cache: gradle
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -65,67 +82,28 @@ jobs:
           set -euo pipefail
           sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
 
-      - name: Checkout FongMi Media
-        uses: actions/checkout@v6
-        with:
-          repository: FongMi/media
-          path: fongmi-media
-          fetch-depth: 1
-
-      - name: Build FongMi Media AARs
+      - name: Verify FongMi media integration
         shell: bash
         run: |
           set -euo pipefail
-          cd fongmi-media
           chmod +x ./gradlew
 
-          echo "Discovering release AAR tasks..."
-          ./gradlew tasks --all --no-daemon > "$GITHUB_WORKSPACE/media-tasks.txt"
+          test -f .deps/media/core_settings.gradle
 
-          mapfile -t TASKS < <(
-            grep -E '^:[A-Za-z0-9_./:-]+:assembleRelease([[:space:]]|$)' "$GITHUB_WORKSPACE/media-tasks.txt" \
-              | awk '{print $1}' \
-              | sort -u
-          )
+          echo "===== Required class source discovery ====="
+          for key in MediaChapter MediaEdition PlayerSeekView DanmakuConfig LibassPlaybackSession MpvPlayer; do
+            echo "--- $key ---"
+            grep -R --include='*.java' --include='*.kt' -n "$key" .deps/media .deps/mpv-android 2>/dev/null | head -20 || true
+          done
 
-          if [ "${#TASKS[@]}" -eq 0 ]; then
-            echo "::warning::No module-qualified assembleRelease tasks found; trying root assembleRelease."
-            ./gradlew assembleRelease --no-daemon --stacktrace
-          else
-            printf 'Media release tasks:\n'
-            printf '  %s\n' "${TASKS[@]}"
-            ./gradlew "${TASKS[@]}" --no-daemon --stacktrace
-          fi
+          echo "===== Gradle Media3 projects ====="
+          ./gradlew projects --no-daemon > build-projects.txt
+          grep -E "media3|mpv|libass|danmaku" build-projects.txt || true
 
-          cd "$GITHUB_WORKSPACE"
-
-          mkdir -p app/libs
-          rm -f app/libs/lib-*.aar
-
-          echo "Collecting FongMi Media AARs..."
-          find fongmi-media \
-            -type f \
-            \( -path "*/buildout/outputs/aar/*.aar" -o -path "*/build/outputs/aar/*.aar" \) \
-            -print \
-            -exec cp -f {} app/libs/ \;
-
-          echo "AAR files copied to app/libs:"
-          ls -lh app/libs/*.aar || true
-
-          if ! compgen -G "app/libs/lib-common*.aar" >/dev/null; then
-            echo "::error::Missing Media3 common AAR (lib-common*.aar)."
-            echo "::error::Media build completed, but the required common library was not copied into app/libs."
-            echo "Searching generated AAR locations for diagnostics..."
-            find fongmi-media -type f -name "*.aar" -print | sort || true
-            exit 1
-          fi
-
-          MEDIA_AAR_COUNT="$(find app/libs -maxdepth 1 -type f -name "lib-*.aar" | wc -l)"
-          echo "Collected $MEDIA_AAR_COUNT FongMi Media lib-*.aar files."
-
-          if [ "$MEDIA_AAR_COUNT" -lt 5 ]; then
-            echo "::warning::Only $MEDIA_AAR_COUNT Media AARs were collected; TV build may still miss Media3 modules."
-          fi
+          # 这些基础模块必须存在，否则说明 media 没有接入成功。
+          grep -q "media3-lib-common" build-projects.txt
+          grep -q "media3-lib-exoplayer" build-projects.txt
+          grep -q "media3-lib-ui" build-projects.txt
 
       - name: Configure release signing
         shell: bash
@@ -161,8 +139,6 @@ jobs:
           storePassword=$WEBHTV_SIGNING_STORE_PASSWORD
           keyPassword=$KEY_PASS
           EOF
-
-          echo "Signing keystore and alias verified."
 
       - name: Build FongMi TV release APKs
         shell: bash
@@ -205,7 +181,6 @@ jobs:
           set -euo pipefail
 
           VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle | head -1)"
-
           if [ -z "$VERSION_NAME" ]; then
             VERSION_NAME="unknown"
           fi
@@ -228,7 +203,7 @@ jobs:
 
           TAG="${{ steps.meta.outputs.tag }}"
           TITLE="${{ steps.meta.outputs.title }}"
-          NOTES="${RELEASE_NOTES:-FongMi TV 自动构建发布。}"
+          NOTES="${RELEASE_NOTES:-FongMi TV 四仓联动自动构建。}"
 
           FLAG=""
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}" = "true" ]; then
