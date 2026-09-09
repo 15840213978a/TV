@@ -1,0 +1,133 @@
+name: Build FongMi TV
+
+on:
+  push:
+    branches:
+      - fongmi
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout TV
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Checkout FongMi media
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/media
+          ref: release
+          path: .deps/media
+          fetch-depth: 1
+
+      - name: Checkout mpv android
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/mpv-android
+          path: .deps/mpv-android
+          fetch-depth: 1
+
+      - name: Checkout mpv
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/mpv
+          path: .deps/mpv
+          fetch-depth: 1
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK
+        run: |
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Enable FongMi media composite build
+        run: |
+          cp settings.gradle settings.gradle.bak
+
+          cat > settings.gradle <<'EOF'
+pluginManagement {
+    includeBuild('.deps/media/build-logic-settings')
+
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+
+plugins {
+    id 'gradlebuild.media3-settings-logic'
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+
+    repositories {
+        google()
+        mavenCentral()
+        flatDir {
+            dirs "$rootDir/app/libs"
+        }
+        maven {
+            url = "https://jitpack.io"
+        }
+    }
+}
+
+includeMedia3.execute(file('.deps/media'))
+
+include ':app'
+include ':catvod'
+include ':chaquo'
+include ':quickjs'
+
+rootProject.name = "TV"
+EOF
+
+      - name: Check project
+        run: |
+          chmod +x gradlew
+          ./gradlew projects --no-daemon
+
+      - name: Build release APK
+        run: |
+          ./gradlew \
+            :app:assembleMobileRelease \
+            :app:assembleLeanbackRelease \
+            --no-daemon \
+            --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          find . -name "*.apk" -type f -exec cp {} dist/ \;
+          ls -lh dist
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FongMi-TV-release
+          path: dist/*.apk
