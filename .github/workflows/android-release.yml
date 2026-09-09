@@ -1,29 +1,10 @@
-name: FongMi TV Four-Repo Build V2
+name: Build FongMi TV
 
 on:
   push:
     branches:
       - fongmi
-      - main
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - "website/**"
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Release tag，留空自动生成"
-        required: false
-        type: string
-      release_notes:
-        description: "Release notes"
-        required: false
-        type: string
-      prerelease:
-        description: "Pre-release"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -33,7 +14,6 @@ env:
 
 jobs:
   build:
-    name: Build FongMi TV
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -41,8 +21,7 @@ jobs:
       - name: Checkout TV
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
-          submodules: recursive
+          fetch-depth: 1
 
       - name: Checkout FongMi media
         uses: actions/checkout@v6
@@ -52,294 +31,103 @@ jobs:
           path: .deps/media
           fetch-depth: 1
 
-      - name: Checkout FongMi mpv-android
+      - name: Checkout mpv android
         uses: actions/checkout@v6
         with:
           repository: FongMi/mpv-android
           path: .deps/mpv-android
           fetch-depth: 1
 
-      - name: Checkout FongMi mpv
+      - name: Checkout mpv
         uses: actions/checkout@v6
         with:
           repository: FongMi/mpv
           path: .deps/mpv
           fetch-depth: 1
 
-      - name: Set up JDK 21
+      - name: Setup Java
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: 21
           cache: gradle
 
-      - name: Set up Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
-        shell: bash
+      - name: Install SDK
         run: |
-          set -euo pipefail
-          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Wire current FongMi media composite build
-        shell: bash
+      - name: Create local.properties
         run: |
-          set -euo pipefail
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-          test -d .deps/media/build-logic-settings
-
-          cp settings.gradle settings.gradle.before-media
-          cp app/build.gradle app/build.gradle.before-media
+      - name: Enable FongMi media composite build
+        run: |
+          cp settings.gradle settings.gradle.bak
 
           cat > settings.gradle <<'EOF'
-          pluginManagement {
-              includeBuild('.deps/media/build-logic-settings')
-              repositories {
-                  gradlePluginPortal()
-                  mavenCentral()
-                  google()
-              }
-          }
+pluginManagement {
+    includeBuild('.deps/media/build-logic-settings')
 
-          plugins {
-              id 'gradlebuild.media3-settings-logic'
-              id "org.gradle.toolchains.foojay-resolver-convention" version "1.0.0"
-          }
+    repositories {
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
 
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  mavenCentral()
-                  google()
-                  flatDir { dirs "$rootDir/app/libs" }
-                  maven { url = "https://jitpack.io" }
-              }
-          }
+plugins {
+    id 'gradlebuild.media3-settings-logic'
+}
 
-          // AndroidX/FongMi media 的当前 release 分支已改用 Composite Build。
-          includeMedia3.execute(file('.deps/media'))
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
 
-          include ':app'
-          include ':catvod'
-          include ':chaquo'
-          include ':quickjs'
-          rootProject.name = "TV"
-          EOF
+    repositories {
+        google()
+        mavenCentral()
+        flatDir {
+            dirs "$rootDir/app/libs"
+        }
+        maven {
+            url = "https://jitpack.io"
+        }
+    }
+}
 
-          # FongMi/media 的复合构建可能需要自己的 sdk.dir。
-          cat > .deps/media/local.properties <<EOF
-          sdk.dir=$ANDROID_HOME
-          EOF
+includeMedia3.execute(file('.deps/media'))
 
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
+include ':app'
+include ':catvod'
+include ':chaquo'
+include ':quickjs'
 
-          build = Path("app/build.gradle")
-          text = build.read_text(encoding="utf-8")
+rootProject.name = "TV"
+EOF
 
-          # Composite build 会用 FongMi/media 本地模块替换这些 Maven 坐标；
-          # 版本号在本地替换时会被忽略。
-          artifacts = {
-              "media3-common",
-              "media3-container",
-              "media3-database",
-              "media3-datasource",
-              "media3-datasource-okhttp",
-              "media3-datasource-rtmp",
-              "media3-decoder",
-              "media3-effect",
-              "media3-exoplayer",
-              "media3-exoplayer-dash",
-              "media3-exoplayer-hls",
-              "media3-exoplayer-rtsp",
-              "media3-exoplayer-smoothstreaming",
-              "media3-extractor",
-              "media3-session",
-              "media3-ui",
-          }
-
-          media_root = Path(".deps/media")
-          libraries = media_root / "libraries"
-
-          # 自动把 FongMi fork 里与 mpv / libass / danmaku 有关的增强模块加入依赖，
-          # 不再猜固定模块名。
-          if libraries.exists():
-              for gradle_file in list(libraries.rglob("build.gradle")) + list(libraries.rglob("build.gradle.kts")):
-                  module_dir = gradle_file.parent
-                  rel = module_dir.relative_to(libraries)
-                  key = str(rel).lower()
-                  if any(word in key for word in ("mpv", "libass", "danmaku")):
-                      # 优先读取明确 artifactId。
-                      gtext = gradle_file.read_text(encoding="utf-8", errors="ignore")
-                      m = re.search(r'artifactId\s*(?:=|\s)\s*["\']([^"\']+)["\']', gtext)
-                      if m:
-                          artifacts.add(m.group(1))
-                      else:
-                          # AndroidX Media 的目录名通常可直接映射到 artifact id。
-                          name = "-".join(rel.parts).replace("_", "-")
-                          if not name.startswith("media3-"):
-                              name = "media3-" + name
-                          artifacts.add(name)
-
-          dep_lines = "\n".join(
-              f'    implementation "androidx.media3:{a}:0.0.0-local"'
-              for a in sorted(artifacts)
-          )
-
-          marker = "dependencies {"
-          if marker not in text:
-              raise SystemExit("dependencies block not found in app/build.gradle")
-
-          block = marker + "\n" + dep_lines + "\n"
-          text = text.replace(marker, block, 1)
-          build.write_text(text, encoding="utf-8")
-
-          print("Injected Media3 artifacts:")
-          for a in sorted(artifacts):
-              print("  ", a)
-          PY
-
-      - name: Verify FongMi source and dependency mapping
-        shell: bash
+      - name: Check project
         run: |
-          set -euo pipefail
-          chmod +x ./gradlew
-
-          echo "===== Required source classes ====="
-          for key in MediaChapter MediaEdition PlayerSeekView DanmakuConfig LibassPlaybackSession MpvPlayer; do
-            echo "--- $key ---"
-            grep -R --include='*.java' --include='*.kt' -n "$key" \
-              .deps/media .deps/mpv-android 2>/dev/null | head -30 || true
-          done
-
-          echo "===== Injected app dependencies ====="
-          grep -n 'androidx.media3:' app/build.gradle || true
-
-          echo "===== Composite build projects ====="
+          chmod +x gradlew
           ./gradlew projects --no-daemon
 
-          echo "===== Mobile compile classpath ====="
-          ./gradlew :app:dependencies \
-            --configuration mobileDebugCompileClasspath \
-            --no-daemon > compile-classpath.txt || true
-          grep -E "androidx.media3|mpv|libass|danmaku" compile-classpath.txt | head -200 || true
-
-      - name: Configure release signing
-        shell: bash
-        env:
-          WEBHTV_SIGNING_KEYSTORE_B64: ${{ secrets.WEBHTV_SIGNING_KEYSTORE_B64 }}
-          WEBHTV_SIGNING_STORE_PASSWORD: ${{ secrets.WEBHTV_SIGNING_STORE_PASSWORD }}
-          WEBHTV_SIGNING_KEY_ALIAS: ${{ secrets.WEBHTV_SIGNING_KEY_ALIAS }}
-          WEBHTV_SIGNING_KEY_PASSWORD: ${{ secrets.WEBHTV_SIGNING_KEY_PASSWORD }}
+      - name: Build release APK
         run: |
-          set -euo pipefail
-
-          if [ -z "${WEBHTV_SIGNING_KEYSTORE_B64:-}" ] || \
-             [ -z "${WEBHTV_SIGNING_STORE_PASSWORD:-}" ] || \
-             [ -z "${WEBHTV_SIGNING_KEY_ALIAS:-}" ]; then
-            echo "::error::Missing signing secrets."
-            exit 1
-          fi
-
-          mkdir -p app/signing
-          printf '%s' "$WEBHTV_SIGNING_KEYSTORE_B64" | base64 --decode > app/signing/release.jks
-          KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
-
-          keytool -list \
-            -keystore app/signing/release.jks \
-            -storepass "$WEBHTV_SIGNING_STORE_PASSWORD" \
-            -alias "$WEBHTV_SIGNING_KEY_ALIAS" >/dev/null
-
-          cat > local.properties <<EOF
-          sdk.dir=$ANDROID_HOME
-          storeFile=$GITHUB_WORKSPACE/app/signing/release.jks
-          keyAlias=$WEBHTV_SIGNING_KEY_ALIAS
-          storePassword=$WEBHTV_SIGNING_STORE_PASSWORD
-          keyPassword=$KEY_PASS
-          EOF
-
-      - name: Build FongMi TV release APKs
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x ./gradlew
-          rm -rf Release/apk
-
           ./gradlew \
             :app:assembleMobileRelease \
             :app:assembleLeanbackRelease \
             --no-daemon \
             --stacktrace
 
-      - name: Collect APKs
-        shell: bash
+      - name: Collect APK
         run: |
-          set -euo pipefail
-          rm -rf dist
           mkdir -p dist
+          find . -name "*.apk" -type f -exec cp {} dist/ \;
+          ls -lh dist
 
-          find Release/apk app/build/outputs/apk \
-            -type f -name "*.apk" -print 2>/dev/null \
-            | sort -u \
-            | while read -r apk; do
-                cp -f "$apk" "dist/$(basename "$apk")"
-              done
-
-          if ! compgen -G "dist/*.apk" >/dev/null; then
-            echo "::error::No APK files found."
-            exit 1
-          fi
-          ls -lh dist/
-
-      - name: Resolve release metadata
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.before-media | head -1)"
-          if [ -z "$VERSION_NAME" ]; then VERSION_NAME="unknown"; fi
-
-          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}"
-          if [ -z "$TAG" ]; then
-            TAG="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
-          fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "title=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || '' }}
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.meta.outputs.tag }}"
-          TITLE="${{ steps.meta.outputs.title }}"
-          NOTES="${RELEASE_NOTES:-FongMi TV 四仓 Composite Build 自动构建。}"
-
-          FLAG=""
-          if [ "${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}" = "true" ]; then
-            FLAG="--prerelease"
-          fi
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.apk --clobber
-          else
-            gh release create "$TAG" \
-              --target "$GITHUB_SHA" \
-              --title "$TITLE" \
-              --notes "$NOTES" \
-              $FLAG \
-              dist/*.apk
-          fi
-
-      - name: Upload APK artifacts
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: FongMi-TV-${{ steps.meta.outputs.tag }}
+          name: FongMi-TV-release
           path: dist/*.apk
-          if-no-files-found: error
-          retention-days: 30
