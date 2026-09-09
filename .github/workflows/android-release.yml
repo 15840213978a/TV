@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
 
       - name: Checkout FongMi Media
         uses: actions/checkout@v6
