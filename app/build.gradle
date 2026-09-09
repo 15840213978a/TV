@@ -86,6 +86,41 @@ android {
 AbiApkPackaging.configure(project, SingleArtifact.APK.INSTANCE)
 
 dependencies {
+    // FongMi/media 本地源码模块。
+    // 核心模块直接依赖，保证 MediaItem / C / ExoPlayer / UI 等来自蜂蜜自己的 media fork。
+    implementation project(':media3-lib-common')
+    implementation project(':media3-lib-container')
+    implementation project(':media3-lib-database')
+    implementation project(':media3-lib-datasource')
+    implementation project(':media3-lib-datasource-okhttp')
+    implementation project(':media3-lib-decoder')
+    implementation project(':media3-lib-effect')
+    implementation project(':media3-lib-exoplayer')
+    implementation project(':media3-lib-exoplayer-dash')
+    implementation project(':media3-lib-exoplayer-hls')
+    implementation project(':media3-lib-exoplayer-rtsp')
+    implementation project(':media3-lib-exoplayer-smoothstreaming')
+    implementation project(':media3-lib-extractor')
+    implementation project(':media3-lib-session')
+    implementation project(':media3-lib-ui')
+
+    // FongMi/media 若存在这些增强模块则自动接入。
+    // 名称按项目实际存在情况判断，不存在不会报错。
+    [
+        ':media3-lib-ui-danmaku',
+        ':media3-lib-danmaku',
+        ':media3-lib-exoplayer-libass',
+        ':media3-lib-ui-libass',
+        ':media3-lib-libass',
+        ':media3-lib-mpvplayer',
+        ':media3-lib-mpv-player',
+        ':media3-mpvplayer'
+    ].each { modulePath ->
+        if (rootProject.findProject(modulePath) != null) {
+            implementation project(modulePath)
+        }
+    }
+
     implementation fileTree(dir: "libs", include: ["*.aar"])
     implementation project(':catvod')
     implementation project(':chaquo')
