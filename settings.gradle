@@ -20,6 +20,14 @@ dependencyResolutionManagement {
     }
 }
 
+// FongMi/media 本地源码接入。
+// GitHub Actions 会把 FongMi/media checkout 到 .deps/media。
+def fongMiMediaSettings = file(".deps/media/core_settings.gradle")
+if (fongMiMediaSettings.exists()) {
+    gradle.ext.androidxMediaModulePrefix = "media3-"
+    apply from: fongMiMediaSettings
+}
+
 include ':app'
 include ':catvod'
 include ':chaquo'
