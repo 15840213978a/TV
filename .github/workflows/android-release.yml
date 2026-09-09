@@ -1,13 +1,14 @@
-name: FongMi TV Build With FongMi Media
+name: FongMi TV Android Release
 
 on:
   push:
     branches:
-      - main
       - fongmi
+      - main
     paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+      - "**/*.md"
+      - "docs/**"
+      - "website/**"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -32,6 +33,7 @@ env:
 
 jobs:
   build:
+    name: Build FongMi TV
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -57,87 +59,63 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android packages
-        run: |
-          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
-
-      - name: Checkout FongMi media fork
-        uses: actions/checkout@v6
-        with:
-          repository: FongMi/media
-          ref: release
-          path: .deps/media
-          fetch-depth: 1
-
-      - name: Wire FongMi Media3 source into TV
+      - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
+          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
 
-          cp settings.gradle settings.gradle.original
-          cp app/build.gradle app/build.gradle.original
+      - name: Checkout FongMi Media
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/media
+          path: fongmi-media
+          fetch-depth: 1
 
-          python3 - <<'PY'
-          from pathlib import Path
-
-          settings = Path("settings.gradle")
-          text = settings.read_text(encoding="utf-8")
-
-          hook = """
-// ===== FongMi Media3 local source =====
-gradle.ext.androidxMediaModulePrefix = 'media3-'
-apply from: file('.deps/media/core_settings.gradle')
-// ===== end FongMi Media3 local source =====
-
-"""
-          if "androidxMediaModulePrefix" not in text:
-              text = hook + text
-              settings.write_text(text, encoding="utf-8")
-
-          build = Path("app/build.gradle")
-          text = build.read_text(encoding="utf-8")
-
-          deps = """
-    // ===== FongMi Media3 local modules =====
-    implementation project(':media3-lib-common')
-    implementation project(':media3-lib-container')
-    implementation project(':media3-lib-database')
-    implementation project(':media3-lib-datasource')
-    implementation project(':media3-lib-datasource-okhttp')
-    implementation project(':media3-lib-decoder')
-    implementation project(':media3-lib-effect')
-    implementation project(':media3-lib-exoplayer')
-    implementation project(':media3-lib-exoplayer-dash')
-    implementation project(':media3-lib-exoplayer-hls')
-    implementation project(':media3-lib-exoplayer-rtsp')
-    implementation project(':media3-lib-exoplayer-smoothstreaming')
-    implementation project(':media3-lib-extractor')
-    implementation project(':media3-lib-session')
-    implementation project(':media3-lib-ui')
-    // ===== end FongMi Media3 local modules =====
-"""
-
-          marker = "dependencies {"
-          if "media3-lib-common" not in text:
-              text = text.replace(marker, marker + "\n" + deps, 1)
-              build.write_text(text, encoding="utf-8")
-          PY
-
-          echo "===== settings.gradle Media3 hook ====="
-          grep -n -A3 -B2 "androidxMediaModulePrefix" settings.gradle || true
-
-          echo "===== app/build.gradle Media3 deps ====="
-          grep -n "media3-lib-" app/build.gradle || true
-
-      - name: Verify Media3 projects
+      - name: Build FongMi Media AARs
+        shell: bash
         run: |
+          set -euo pipefail
+          cd fongmi-media
           chmod +x ./gradlew
-          ./gradlew projects --no-daemon | tee gradle-projects.txt
-          grep "media3-lib-common" gradle-projects.txt
-          grep "media3-lib-exoplayer" gradle-projects.txt
-          grep "media3-lib-ui" gradle-projects.txt
 
-      - name: Configure signing
+          echo "Discovering release AAR tasks..."
+          ./gradlew tasks --all --no-daemon > "$GITHUB_WORKSPACE/media-tasks.txt"
+
+          mapfile -t TASKS < <(
+            grep -E '^:[A-Za-z0-9_./:-]+:assembleRelease([[:space:]]|$)' "$GITHUB_WORKSPACE/media-tasks.txt" \
+              | awk '{print $1}' \
+              | sort -u
+          )
+
+          if [ "${#TASKS[@]}" -eq 0 ]; then
+            echo "::warning::No module-qualified assembleRelease tasks found; trying root assembleRelease."
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            printf 'Media release tasks:\n'
+            printf '  %s\n' "${TASKS[@]}"
+            ./gradlew "${TASKS[@]}" --no-daemon --stacktrace
+          fi
+
+          cd "$GITHUB_WORKSPACE"
+
+          mkdir -p app/libs
+          find fongmi-media \
+            -type f \
+            -path "*/build/outputs/aar/*.aar" \
+            -print \
+            -exec cp -f {} app/libs/ \;
+
+          echo "AAR files now available in app/libs:"
+          ls -lh app/libs/*.aar || true
+
+          MEDIA_AAR_COUNT="$(find app/libs -maxdepth 1 -type f -name "*.aar" | wc -l)"
+          if [ "$MEDIA_AAR_COUNT" -eq 0 ]; then
+            echo "::error::FongMi Media build produced no AAR files."
+            exit 1
+          fi
+
+      - name: Configure release signing
         shell: bash
         env:
           WEBHTV_SIGNING_KEYSTORE_B64: ${{ secrets.WEBHTV_SIGNING_KEYSTORE_B64 }}
@@ -146,38 +124,41 @@ apply from: file('.deps/media/core_settings.gradle')
           WEBHTV_SIGNING_KEY_PASSWORD: ${{ secrets.WEBHTV_SIGNING_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "${WEBHTV_SIGNING_KEYSTORE_B64:-}"
-          test -n "${WEBHTV_SIGNING_STORE_PASSWORD:-}"
-          test -n "${WEBHTV_SIGNING_KEY_ALIAS:-}"
+
+          if [ -z "${WEBHTV_SIGNING_KEYSTORE_B64:-}" ] || \
+             [ -z "${WEBHTV_SIGNING_STORE_PASSWORD:-}" ] || \
+             [ -z "${WEBHTV_SIGNING_KEY_ALIAS:-}" ]; then
+            echo "::error::Missing signing secrets."
+            exit 1
+          fi
 
           mkdir -p app/signing
           printf '%s' "$WEBHTV_SIGNING_KEYSTORE_B64" | base64 --decode > app/signing/release.jks
+
+          KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
 
           keytool -list \
             -keystore app/signing/release.jks \
             -storepass "$WEBHTV_SIGNING_STORE_PASSWORD" \
             -alias "$WEBHTV_SIGNING_KEY_ALIAS" >/dev/null
 
-          KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
-
           cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
           storeFile=$GITHUB_WORKSPACE/app/signing/release.jks
           keyAlias=$WEBHTV_SIGNING_KEY_ALIAS
           storePassword=$WEBHTV_SIGNING_STORE_PASSWORD
           keyPassword=$KEY_PASS
           EOF
 
-      - name: Compile check
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew :app:compileMobileArm64_v8aDebugJavaWithJavac --no-daemon --stacktrace
+          echo "Signing keystore and alias verified."
 
-      - name: Build FongMi APKs
+      - name: Build FongMi TV release APKs
         shell: bash
         run: |
           set -euo pipefail
+          chmod +x ./gradlew
           rm -rf Release/apk
+
           ./gradlew \
             :app:assembleMobileRelease \
             :app:assembleLeanbackRelease \
@@ -192,12 +173,14 @@ apply from: file('.deps/media/core_settings.gradle')
           mkdir -p dist
 
           find Release/apk app/build/outputs/apk \
-            -type f -name "*.apk" -print 2>/dev/null | sort -u | while read -r apk; do
-              cp "$apk" "dist/$(basename "$apk")"
-          done
+            -type f -name "*.apk" -print 2>/dev/null \
+            | sort -u \
+            | while read -r apk; do
+                cp -f "$apk" "dist/$(basename "$apk")"
+              done
 
           if ! compgen -G "dist/*.apk" >/dev/null; then
-            echo "::error::No APK found"
+            echo "::error::No APK files found."
             exit 1
           fi
 
@@ -208,11 +191,18 @@ apply from: file('.deps/media/core_settings.gradle')
         shell: bash
         run: |
           set -euo pipefail
-          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.original | head -1)"
+
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle | head -1)"
+
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="unknown"
+          fi
+
           TAG="${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}"
           if [ -z "$TAG" ]; then
             TAG="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
           fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "title=${TAG#v}" >> "$GITHUB_OUTPUT"
 
@@ -223,9 +213,10 @@ apply from: file('.deps/media/core_settings.gradle')
           RELEASE_NOTES: ${{ github.event_name == 'workflow_dispatch' && inputs.release_notes || '' }}
         run: |
           set -euo pipefail
+
           TAG="${{ steps.meta.outputs.tag }}"
           TITLE="${{ steps.meta.outputs.title }}"
-          NOTES="${RELEASE_NOTES:-FongMi TV + FongMi Media3 源码构建。}"
+          NOTES="${RELEASE_NOTES:-FongMi TV 自动构建发布。}"
 
           FLAG=""
           if [ "${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}" = "true" ]; then
