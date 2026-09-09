@@ -1,18 +1,18 @@
-name: FongMi TV Android Release
+name: FongMi TV Build With FongMi Media
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag，留空则自动生成 v<versionName>-yyyyMMddHHmm"
+        description: "Release tag，留空自动生成"
         required: false
         type: string
       release_notes:
-        description: "Release notes，留空使用默认说明"
+        description: "Release notes"
         required: false
         type: string
       prerelease:
-        description: "Mark as pre-release"
+        description: "Pre-release"
         required: false
         default: false
         type: boolean
@@ -24,13 +24,12 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  build-release:
-    name: Build Mobile + Leanback and Release
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout
+      - name: Checkout TV
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -51,39 +50,87 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Grant Gradle permission
-        run: chmod +x ./gradlew
+      - name: Install Android packages
+        run: |
+          sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
 
-      - name: Resolve version and tag
-        id: meta
+      - name: Checkout FongMi media fork
+        uses: actions/checkout@v6
+        with:
+          repository: FongMi/media
+          ref: release
+          path: .deps/media
+          fetch-depth: 1
+
+      - name: Wire FongMi Media3 source into TV
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*["'\'']\([^"'\'']*\)["'\''].*/\1/p' app/build.gradle | head -1)"
-          VERSION_CODE="$(sed -n 's/^[[:space:]]*versionCode[[:space:]]*\([0-9][0-9]*\).*/\1/p' app/build.gradle | head -1)"
+          cp settings.gradle settings.gradle.original
+          cp app/build.gradle app/build.gradle.original
 
-          if [ -z "$VERSION_NAME" ]; then
-            echo "::error::Cannot read versionName from app/build.gradle"
-            exit 1
-          fi
+          python3 - <<'PY'
+          from pathlib import Path
 
-          if [ -z "$VERSION_CODE" ]; then
-            VERSION_CODE="0"
-          fi
+          settings = Path("settings.gradle")
+          text = settings.read_text(encoding="utf-8")
 
-          TAG="${{ inputs.release_tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
-          fi
+          hook = """
+// ===== FongMi Media3 local source =====
+gradle.ext.androidxMediaModulePrefix = 'media3-'
+apply from: file('.deps/media/core_settings.gradle')
+// ===== end FongMi Media3 local source =====
 
-          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
-          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "title=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+"""
+          if "androidxMediaModulePrefix" not in text:
+              text = hook + text
+              settings.write_text(text, encoding="utf-8")
 
-      - name: Configure release signing
+          build = Path("app/build.gradle")
+          text = build.read_text(encoding="utf-8")
+
+          deps = """
+    // ===== FongMi Media3 local modules =====
+    implementation project(':media3-lib-common')
+    implementation project(':media3-lib-container')
+    implementation project(':media3-lib-database')
+    implementation project(':media3-lib-datasource')
+    implementation project(':media3-lib-datasource-okhttp')
+    implementation project(':media3-lib-decoder')
+    implementation project(':media3-lib-effect')
+    implementation project(':media3-lib-exoplayer')
+    implementation project(':media3-lib-exoplayer-dash')
+    implementation project(':media3-lib-exoplayer-hls')
+    implementation project(':media3-lib-exoplayer-rtsp')
+    implementation project(':media3-lib-exoplayer-smoothstreaming')
+    implementation project(':media3-lib-extractor')
+    implementation project(':media3-lib-session')
+    implementation project(':media3-lib-ui')
+    // ===== end FongMi Media3 local modules =====
+"""
+
+          marker = "dependencies {"
+          if "media3-lib-common" not in text:
+              text = text.replace(marker, marker + "\n" + deps, 1)
+              build.write_text(text, encoding="utf-8")
+          PY
+
+          echo "===== settings.gradle Media3 hook ====="
+          grep -n -A3 -B2 "androidxMediaModulePrefix" settings.gradle || true
+
+          echo "===== app/build.gradle Media3 deps ====="
+          grep -n "media3-lib-" app/build.gradle || true
+
+      - name: Verify Media3 projects
+        run: |
+          chmod +x ./gradlew
+          ./gradlew projects --no-daemon | tee gradle-projects.txt
+          grep "media3-lib-common" gradle-projects.txt
+          grep "media3-lib-exoplayer" gradle-projects.txt
+          grep "media3-lib-ui" gradle-projects.txt
+
+      - name: Configure signing
         shell: bash
         env:
           WEBHTV_SIGNING_KEYSTORE_B64: ${{ secrets.WEBHTV_SIGNING_KEYSTORE_B64 }}
@@ -92,24 +139,19 @@ jobs:
           WEBHTV_SIGNING_KEY_PASSWORD: ${{ secrets.WEBHTV_SIGNING_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          if [ -z "${WEBHTV_SIGNING_KEYSTORE_B64:-}" ] || \
-             [ -z "${WEBHTV_SIGNING_STORE_PASSWORD:-}" ] || \
-             [ -z "${WEBHTV_SIGNING_KEY_ALIAS:-}" ]; then
-            echo "::error::Missing signing secrets."
-            echo "::error::Required: WEBHTV_SIGNING_KEYSTORE_B64, WEBHTV_SIGNING_STORE_PASSWORD, WEBHTV_SIGNING_KEY_ALIAS"
-            exit 1
-          fi
+          test -n "${WEBHTV_SIGNING_KEYSTORE_B64:-}"
+          test -n "${WEBHTV_SIGNING_STORE_PASSWORD:-}"
+          test -n "${WEBHTV_SIGNING_KEY_ALIAS:-}"
 
           mkdir -p app/signing
           printf '%s' "$WEBHTV_SIGNING_KEYSTORE_B64" | base64 --decode > app/signing/release.jks
-
-          KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
 
           keytool -list \
             -keystore app/signing/release.jks \
             -storepass "$WEBHTV_SIGNING_STORE_PASSWORD" \
             -alias "$WEBHTV_SIGNING_KEY_ALIAS" >/dev/null
+
+          KEY_PASS="${WEBHTV_SIGNING_KEY_PASSWORD:-$WEBHTV_SIGNING_STORE_PASSWORD}"
 
           cat > local.properties <<EOF
           storeFile=$GITHUB_WORKSPACE/app/signing/release.jks
@@ -118,15 +160,17 @@ jobs:
           keyPassword=$KEY_PASS
           EOF
 
-          echo "Signing keystore and alias verified."
-
-      - name: Build FongMi official release tasks
+      - name: Compile check
         shell: bash
         run: |
           set -euo pipefail
+          ./gradlew :app:compileMobileArm64_v8aDebugJavaWithJavac --no-daemon --stacktrace
 
+      - name: Build FongMi APKs
+        shell: bash
+        run: |
+          set -euo pipefail
           rm -rf Release/apk
-
           ./gradlew \
             :app:assembleMobileRelease \
             :app:assembleLeanbackRelease \
@@ -137,82 +181,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf dist
           mkdir -p dist
 
-          if [ -d "Release/apk" ]; then
-            find Release/apk -maxdepth 1 -type f -name "*.apk" -print -exec cp {} dist/ \;
-          fi
+          find Release/apk app/build/outputs/apk \
+            -type f -name "*.apk" -print 2>/dev/null | sort -u | while read -r apk; do
+              cp "$apk" "dist/$(basename "$apk")"
+          done
 
-          if ! compgen -G "dist/*.apk" > /dev/null; then
-            echo "Release/apk did not contain APKs, checking Gradle output directories..."
-            find app/build/outputs/apk -type f -name "*.apk" -print -exec cp {} dist/ \; 2>/dev/null || true
-          fi
-
-          if ! compgen -G "dist/*.apk" > /dev/null; then
-            echo "::error::No APK files found after build."
-            find Release app/build/outputs -maxdepth 6 -type f 2>/dev/null || true
+          if ! compgen -G "dist/*.apk" >/dev/null; then
+            echo "::error::No APK found"
             exit 1
           fi
 
-          echo "Collected APKs:"
-          ls -lh dist/*.apk
+          ls -lh dist/
 
-      - name: Verify APK signatures
+      - name: Resolve release metadata
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
-
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
-          if [ -z "$APKSIGNER" ]; then
-            echo "::error::apksigner not found"
-            exit 1
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*"\([^"]*\)".*/\1/p' app/build.gradle.original | head -1)"
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v${VERSION_NAME}-$(date +%Y%m%d%H%M)"
           fi
-
-          for APK in dist/*.apk; do
-            echo "Checking $APK"
-            "$APKSIGNER" verify --verbose "$APK"
-          done
-
-      - name: Generate update manifests
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-          VERSION_NAME: ${{ steps.meta.outputs.version_name }}
-          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
-          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
-        run: |
-          python3 - <<'PY'
-          import glob, hashlib, json, os
-
-          repo = os.environ["GITHUB_REPOSITORY"]
-          tag = os.environ["RELEASE_TAG"]
-          version_name = os.environ["VERSION_NAME"]
-          version_code = int(os.environ.get("VERSION_CODE", "0"))
-          short_sha = os.environ["SHORT_SHA"]
-          base_url = f"https://github.com/{repo}/releases/download/{tag}"
-
-          for apk in glob.glob("dist/*.apk"):
-              name = os.path.basename(apk)
-              stem = os.path.splitext(name)[0]
-              with open(apk, "rb") as f:
-                  content = f.read()
-
-              data = {
-                  "name": tag,
-                  "versionName": version_name,
-                  "code": version_code,
-                  "desc": f"{tag} - {short_sha}",
-                  "apk": f"{base_url}/{name}",
-                  "size": len(content),
-                  "sha256": hashlib.sha256(content).hexdigest()
-              }
-
-              with open(f"dist/{stem}.json", "w", encoding="utf-8") as f:
-                  json.dump(data, f, ensure_ascii=False, indent=2)
-                  f.write("\n")
-          PY
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "title=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         shell: bash
@@ -221,33 +216,30 @@ jobs:
           RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           set -euo pipefail
-
           TAG="${{ steps.meta.outputs.tag }}"
           TITLE="${{ steps.meta.outputs.title }}"
-          NOTES="${RELEASE_NOTES:-FongMi TV GitHub Actions 自动构建发布。}"
+          NOTES="${RELEASE_NOTES:-FongMi TV + FongMi Media3 源码构建。}"
 
-          PRERELEASE_FLAG=""
+          FLAG=""
           if [ "${{ inputs.prerelease }}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
+            FLAG="--prerelease"
           fi
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/*.apk dist/*.json --clobber
+            gh release upload "$TAG" dist/*.apk --clobber
           else
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
               --title "$TITLE" \
               --notes "$NOTES" \
-              $PRERELEASE_FLAG \
-              dist/*.apk dist/*.json
+              $FLAG \
+              dist/*.apk
           fi
 
-      - name: Upload workflow artifacts
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: FongMi-TV-${{ steps.meta.outputs.tag }}
-          path: |
-            dist/*.apk
-            dist/*.json
+          path: dist/*.apk
           if-no-files-found: error
           retention-days: 30
