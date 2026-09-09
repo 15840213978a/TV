@@ -100,19 +100,31 @@ jobs:
           cd "$GITHUB_WORKSPACE"
 
           mkdir -p app/libs
+          rm -f app/libs/lib-*.aar
+
+          echo "Collecting FongMi Media AARs..."
           find fongmi-media \
             -type f \
-            -path "*/build/outputs/aar/*.aar" \
+            \( -path "*/buildout/outputs/aar/*.aar" -o -path "*/build/outputs/aar/*.aar" \) \
             -print \
             -exec cp -f {} app/libs/ \;
 
-          echo "AAR files now available in app/libs:"
+          echo "AAR files copied to app/libs:"
           ls -lh app/libs/*.aar || true
 
-          MEDIA_AAR_COUNT="$(find app/libs -maxdepth 1 -type f -name "*.aar" | wc -l)"
-          if [ "$MEDIA_AAR_COUNT" -eq 0 ]; then
-            echo "::error::FongMi Media build produced no AAR files."
+          if ! compgen -G "app/libs/lib-common*.aar" >/dev/null; then
+            echo "::error::Missing Media3 common AAR (lib-common*.aar)."
+            echo "::error::Media build completed, but the required common library was not copied into app/libs."
+            echo "Searching generated AAR locations for diagnostics..."
+            find fongmi-media -type f -name "*.aar" -print | sort || true
             exit 1
+          fi
+
+          MEDIA_AAR_COUNT="$(find app/libs -maxdepth 1 -type f -name "lib-*.aar" | wc -l)"
+          echo "Collected $MEDIA_AAR_COUNT FongMi Media lib-*.aar files."
+
+          if [ "$MEDIA_AAR_COUNT" -lt 5 ]; then
+            echo "::warning::Only $MEDIA_AAR_COUNT Media AARs were collected; TV build may still miss Media3 modules."
           fi
 
       - name: Configure release signing
