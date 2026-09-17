@@ -37,8 +37,23 @@ jobs:
       - name: Ensure Android SDK 37
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platforms;android-37" "platform-tools"
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT"
+            find "$SDK_ROOT" -maxdepth 4 -type f -name sdkmanager -print 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-37" "platform-tools"
 
       - name: Cache Chaquopy
         uses: actions/cache@v4
