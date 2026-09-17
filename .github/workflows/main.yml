@@ -262,8 +262,8 @@ jobs:
 
           cp "$MOBILE_64" "dist/mobile-arm64-v8a.apk"
           cp "$MOBILE_32" "dist/mobile-armeabi-v7a.apk"
-          cp "$TV_64" "dist/tv-arm64-v8a.apk"
-          cp "$TV_32" "dist/tv-armeabi-v7a.apk"
+          cp "$TV_64" "dist/leanback-arm64_v8a.apk"
+          cp "$TV_32" "dist/leanback-armeabi_v7a.apk"
 
           COUNT="$(find dist -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
           [ "$COUNT" = "4" ] || {
@@ -298,8 +298,8 @@ jobs:
 
           - mobile arm64-v8a
           - mobile armeabi-v7a
-          - TV arm64-v8a
-          - TV armeabi-v7a
+          - leanback arm64-v8a
+          - leanback armeabi-v7a
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -317,8 +317,8 @@ jobs:
           for APK in \
             "dist/mobile-arm64-v8a.apk" \
             "dist/mobile-armeabi-v7a.apk" \
-            "dist/tv-arm64-v8a.apk" \
-            "dist/tv-armeabi-v7a.apk"
+            "dist/leanback-arm64_v8a.apk" \
+            "dist/leanback-armeabi_v7a.apk"
           do
             gh release upload "$TAG" "$APK" --clobber
           done
