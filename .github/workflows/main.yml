@@ -170,7 +170,49 @@ jobs:
           echo "Release signing configured."
 
       - name: Grant execute permission
-        run: chmod +x gradlew
+        run: chmod +x gradlew media3/gradlew
+
+      - name: Build matching FongMi Media3 AARs
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.internal.http.connectionTimeout=120000 -Dorg.gradle.internal.http.socketTimeout=120000"
+        run: |
+          set -euo pipefail
+
+          MEDIA_TASKS=()
+          while IFS= read -r AAR || [ -n "$AAR" ]; do
+            AAR="${AAR%$'\r'}"
+            [ -n "$AAR" ] || continue
+            MODULE="${AAR%-release.aar}"
+            MEDIA_TASKS+=(":${MODULE}:assembleRelease")
+          done < media3/move.txt
+
+          ./media3/gradlew \
+            -p media3 \
+            "${MEDIA_TASKS[@]}" \
+            --stacktrace \
+            --no-daemon
+
+          COPIED=0
+          while IFS= read -r AAR || [ -n "$AAR" ]; do
+            AAR="${AAR%$'\r'}"
+            [ -n "$AAR" ] || continue
+            SOURCE="$(find media3/libraries -type f -path "*/build/outputs/aar/$AAR" -print -quit)"
+            if [ -z "$SOURCE" ]; then
+              echo "::error::Missing Media3 AAR: $AAR"
+              exit 1
+            fi
+            cp "$SOURCE" app/libs/"$AAR"
+            COPIED=$((COPIED + 1))
+          done < media3/move.txt
+
+          EXPECTED="$(grep -cve '^[[:space:]]*$' media3/move.txt)"
+          [ "$COPIED" -eq "$EXPECTED" ] || {
+            echo "::error::Copied $COPIED Media3 AARs, expected $EXPECTED"
+            exit 1
+          }
+
+          echo "== Media3 AARs copied to app/libs =="
+          find app/libs -maxdepth 1 -type f -name 'lib-*-release.aar' -print | sort
 
       - name: Verify expected build tasks
         run: |
