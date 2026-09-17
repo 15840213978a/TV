@@ -196,7 +196,9 @@ jobs:
           while IFS= read -r AAR || [ -n "$AAR" ]; do
             AAR="${AAR%$'\r'}"
             [ -n "$AAR" ] || continue
-            SOURCE="$(find media3/libraries -type f -path "*/build/outputs/aar/$AAR" -print -quit)"
+            # Media3 redirects every module's build directory to media3/buildout,
+            # so search the checkout rather than assuming libraries/*/build.
+            SOURCE="$(find media3 -type f -path "*/outputs/aar/$AAR" -print -quit)"
             if [ -z "$SOURCE" ]; then
               echo "::error::Missing Media3 AAR: $AAR"
               exit 1
