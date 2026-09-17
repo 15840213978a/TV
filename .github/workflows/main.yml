@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Checkout matching FongMi Media3 source
         uses: actions/checkout@v4
