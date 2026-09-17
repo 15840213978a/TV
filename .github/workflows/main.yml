@@ -31,14 +31,16 @@ jobs:
           path: media3
           fetch-depth: 1
 
-      - name: Remove unavailable libass integration
+      - name: Align unpublished player integrations
         shell: bash
         run: |
           set -euo pipefail
 
-          # The TV source references a newer private libass AAR which is not
-          # published with the repository. Revert only that feature while
-          # retaining MPV, danmaku, chapters and all later unrelated fixes.
+          # These two TV commits reference unpublished Media3 libass and
+          # PlayerView-controller APIs. Revert only those integrations while
+          # retaining the published danmaku, MPV and chapter implementations.
+          git revert --no-commit 9050830c58290fb7979670412e53bb9e44444791
+
           set +e
           git revert --no-commit b9455fb1b8485416e9231df174cdf747ad3ccf8c
           REVERT_STATUS=$?
@@ -63,8 +65,8 @@ jobs:
 
           git revert --quit || true
 
-          if grep -R "androidx.media3.*libass" app/src/main/java; then
-            echo "::error::The unavailable libass API is still referenced"
+          if grep -R -E "androidx\.media3.*(libass|DanmakuPlayerViewController)" app/src/main/java; then
+            echo "::error::An unavailable Media3 API is still referenced"
             exit 1
           fi
 
