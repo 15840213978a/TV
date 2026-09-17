@@ -52,9 +52,6 @@ jobs:
           fi
 
           echo "Using sdkmanager: $SDKMANAGER"
-
-          # Android 17 / API 37 is still distributed as the Cinnamon Bun preview,
-          # so it is not visible on sdkmanager's stable channel.
           echo "== Android 37 packages visible on preview/canary channels =="
           "$SDKMANAGER" --list --channel=3 | grep -E 'platforms;android-37|build-tools;37\.' || true
 
@@ -63,16 +60,17 @@ jobs:
           set -o pipefail
 
           "$SDKMANAGER" --channel=3 \
-            "platforms;android-37" \
+            "platforms;android-37.0" \
+            "build-tools;37.0.0" \
             "platform-tools"
 
-          test -f "$SDK_ROOT/platforms/android-37/android.jar" || {
-            echo "::error::Android API 37 platform was not installed correctly"
+          test -f "$SDK_ROOT/platforms/android-37.0/android.jar" || {
+            echo "::error::Android API 37.0 platform was not installed correctly"
             find "$SDK_ROOT/platforms" -maxdepth 2 -type f -name android.jar -print 2>/dev/null || true
             exit 1
           }
 
-          echo "Android API 37 installed successfully."
+          echo "Android API 37.0 installed successfully."
 
       - name: Cache Chaquopy
         uses: actions/cache@v4
