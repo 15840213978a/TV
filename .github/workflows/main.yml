@@ -20,6 +20,51 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
+      - name: Checkout matching FongMi Media3 source
+        uses: actions/checkout@v4
+        with:
+          repository: FongMi/media
+          ref: 3c2cbe8ac742c2fe15eff52f03eeb3b1b648848d
+          path: media3
+          fetch-depth: 1
+
+      - name: Remove unavailable libass integration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The TV source references a newer private libass AAR which is not
+          # published with the repository. Revert only that feature while
+          # retaining MPV, danmaku, chapters and all later unrelated fixes.
+          set +e
+          git revert --no-commit b9455fb1b8485416e9231df174cdf747ad3ccf8c
+          REVERT_STATUS=$?
+          set -e
+
+          if [ "$REVERT_STATUS" -ne 0 ]; then
+            git checkout --theirs -- \
+              app/src/main/java/com/fongmi/android/tv/ui/dialog/SubtitleSettingPanel.java \
+              app/src/main/res/layout/view_subtitle_appearance.xml \
+              app/src/main/res/values/strings.xml \
+              app/src/main/res/values-zh-rCN/strings.xml \
+              app/src/main/res/values-zh-rTW/strings.xml
+            git add -A app
+          fi
+
+          UNRESOLVED="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$UNRESOLVED" ]; then
+            echo "::error::Unresolved files after libass revert:"
+            printf '%s\n' "$UNRESOLVED"
+            exit 1
+          fi
+
+          git revert --quit || true
+
+          if grep -R "androidx.media3.*libass" app/src/main/java; then
+            echo "::error::The unavailable libass API is still referenced"
+            exit 1
+          fi
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -61,7 +106,10 @@ jobs:
 
           "$SDKMANAGER" --channel=3 \
             "platforms;android-37.0" \
+            "platforms;android-36" \
             "build-tools;37.0.0" \
+            "cmake;3.22.1" \
+            "ndk;29.0.14206865" \
             "platform-tools"
 
           test -f "$SDK_ROOT/platforms/android-37.0/android.jar" || {

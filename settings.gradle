@@ -20,6 +20,12 @@ dependencyResolutionManagement {
     }
 }
 
+// FongMi's player uses a patched Media3 build (MPV, danmaku, chapter/edition APIs).
+// GitHub Actions checks the matching source into this directory before Gradle starts.
+if (file("media3").isDirectory()) {
+    includeBuild("media3")
+}
+
 include ':app'
 include ':catvod'
 include ':chaquo'
